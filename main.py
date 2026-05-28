@@ -1,13 +1,17 @@
 import streamlit as st
+from menu import show_menu
 
 # ================= LOGIN =================
 def login():
+
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
 
+    # kalau sudah login
     if st.session_state.logged_in:
         return True
 
+    # form login
     st.title("Login")
 
     password = st.text_input(
@@ -25,11 +29,10 @@ def login():
     return False
 
 
-# ================= STOP JIKA BELUM LOGIN =================
+# ================= CEK LOGIN =================
 if not login():
     st.stop()
 
 
 # ================= APP UTAMA =================
-st.sidebar.title("Hantaran Mutiara")
-st.write("Aplikasi jalan di sini")
+show_menu()
