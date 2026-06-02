@@ -1,51 +1,5 @@
 import streamlit as st
-from utils.database import get_table
-
-@st.cache_data(ttl=300)
-def load_master_paket():
-    return get_table("master_paket_hantaran")
-
-@st.cache_data(ttl=300)
-def load_harga_hantaran():
-    return get_table("harga_hantaran")
-
-@st.cache_data(ttl=300)
-def load_master_with_price():
-    df_master = load_master_paket()
-    df_harga = load_harga_hantaran()
-
-    df_harga = (
-        df_harga
-        .pivot(
-            index="kode_paket",
-            columns="kategori_hantaran",
-            values="harga_sewa"
-        )
-        .reset_index()
-    )
-
-    df_harga = df_harga.rename(
-        columns={
-            "Wedding": "harga_wedding",
-            "Engagement": "harga_engagement"
-        }
-    )
-
-    return df_master.merge(
-        df_harga,
-        on="kode_paket",
-        how="left"
-    )
-
-@st.cache_data(ttl=300)
-def load_detail_paket():
-    return get_table("detail_isi_paket")
-
-
-@st.cache_data(ttl=300)
-def load_produk_satuan():
-    return get_table("produk_hantaran_satuan")
-
+from utils.hantaran_service import (load_master_with_price, load_all_detail_paket, load_produk_satuan)
 
 DISPLAY_COLUMNS = {
     "master_paket": [
@@ -93,6 +47,12 @@ def prepare_dataframe(df, display_columns):
 
     return df
 
+def format_rupiah(value):
+    if not value:
+        return "-"
+
+    return f"Rp{value:,.0f}".replace(",", ".")
+
 
 def data_hantaran_page():
 
@@ -106,19 +66,24 @@ def data_hantaran_page():
     # ==================================================
     st.header("Daftar Paket")
 
-    df_master = prepare_dataframe(
-        load_master_with_price(),
-        DISPLAY_COLUMNS["master_paket"]
-    )
-    df_master["Harga Wedding"] = df_master["Harga Wedding"].apply(
-        lambda x: f"Rp{x:,.0f}".replace(",", ".")
-        if x else "-"
+    df_master_raw = load_master_with_price()
+
+    df_master_raw = (
+        df_master_raw
+        .sort_values(
+            by=["status_aktif", "kode_paket"],
+            ascending=[False, True]
+        )
+        .reset_index(drop=True)
     )
 
-    df_master["Harga Engagement"] = df_master["Harga Engagement"].apply(
-        lambda x: f"Rp{x:,.0f}".replace(",", ".")
-        if x else "-"
+    df_master = prepare_dataframe(
+        df_master_raw,
+        DISPLAY_COLUMNS["master_paket"]
     )
+
+    for col in ["Harga Wedding", "Harga Engagement"]:
+        df_master[col] = df_master[col].apply(format_rupiah)
 
     df_master["Status"] = df_master["Status Aktif"].apply(
         lambda x: "🟢 Tersedia" if x else "🔴 Disewa"
@@ -139,41 +104,29 @@ def data_hantaran_page():
     st.divider()
     st.header("Daftar Isi Paket")
 
-    df_detail_raw = load_detail_paket()
+    df_detail_raw = load_all_detail_paket()
 
-    tab_wedding, tab_engagement = st.tabs(
-        ["Wedding", "Engagement"]
-    )
+    kategori_list = [
+        "Wedding",
+        "Engagement"
+    ]
 
-    with tab_wedding:
-        df_wedding = df_detail_raw[
-            df_detail_raw["kategori_hantaran"] == "Wedding"
-        ].copy()
+    tabs = st.tabs(kategori_list)
+    for tab, kategori in zip(tabs, kategori_list):
+        with tab:
+            df = df_detail_raw[
+                df_detail_raw["kategori_hantaran"] == kategori
+            ].copy()
 
-        df_wedding = prepare_dataframe(
-            df_wedding,
-            DISPLAY_COLUMNS["detail_paket"]
-        )
+            df = prepare_dataframe(
+                df,
+                DISPLAY_COLUMNS["detail_paket"]
+            )
 
-        st.dataframe(
-            df_wedding,
-            use_container_width=True
-        )
-
-    with tab_engagement:
-        df_engagement = df_detail_raw[
-            df_detail_raw["kategori_hantaran"] == "Engagement"
-        ].copy()
-
-        df_engagement = prepare_dataframe(
-            df_engagement,
-            DISPLAY_COLUMNS["detail_paket"]
-        )
-
-        st.dataframe(
-            df_engagement,
-            use_container_width=True
-        )
+            st.dataframe(
+                df,
+                use_container_width=True
+            )
 
     # ==================================================
     # DAFTAR STOCK
@@ -185,10 +138,6 @@ def data_hantaran_page():
         load_produk_satuan(),
         DISPLAY_COLUMNS["produk_satuan"]
     )
-
-    df_stock = df_stock.reset_index(drop=True)
-    df_stock.index += 1
-    df_stock.index.name = "No"
 
     st.dataframe(
         df_stock,
