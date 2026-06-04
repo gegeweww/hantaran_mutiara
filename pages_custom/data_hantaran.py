@@ -116,7 +116,7 @@ def data_hantaran_page():
         with tab:
             df = df_detail_raw[
                 df_detail_raw["kategori_hantaran"] == kategori
-            ].copy()
+            ].sort_values(by=["kode_paket", "nama_item", "tipe_item"]).copy()
 
             df = prepare_dataframe(
                 df,
