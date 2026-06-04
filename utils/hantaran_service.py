@@ -1,6 +1,6 @@
 import streamlit as st
 
-from utils.database import get_table
+from utils.database import (get_table, update_data)
 
 
 @st.cache_data(ttl=300)
@@ -43,19 +43,26 @@ def load_produk_satuan():
 
 def update_status_paket(kode_paket):
 
-    query = """
-        UPDATE master_hantaran
-        SET status_aktif = FALSE
-        WHERE kode_paket = %s
-        AND status_aktif = TRUE
-    """
+    update_data(
+        "master_paket_hantaran",
+        {"status_aktif": False},
+        "kode_paket",
+        kode_paket
+    )
 
-def load_detail_paket(kode_paket):
+def load_detail_paket(
+    kode_paket,
+    kategori_hantaran):
 
     df = load_all_detail_paket()
 
     return (
-        df[df["kode_paket"] == kode_paket]
+        df.loc[
+            (df["kode_paket"] == kode_paket)
+            &
+            (df["kategori_hantaran"] == kategori_hantaran)
+        ]
+        .copy()
         .sort_values("nama_item")
         .reset_index(drop=True)
     )
