@@ -1,5 +1,5 @@
 import streamlit as st
-from utils.hantaran_service import (load_master_with_price, load_all_detail_paket, load_produk_satuan)
+from hantaran_tools.hantaran_service import (load_master_with_price, load_all_detail_paket, load_produk_satuan)
 
 DISPLAY_COLUMNS = {
     "master_paket": [

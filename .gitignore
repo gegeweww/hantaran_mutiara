@@ -3,3 +3,5 @@ venv/
 __pycache__/
 *.pyc
 .streamlit/secrets.toml
+.DS_Store
+struktur_project.txt
