@@ -1,15 +1,15 @@
 import streamlit as st
 import pandas as pd
-from datetime import timedelta
+from datetime import date, timedelta
 
 from common_tools.database import insert_data
 from common_tools.id_generator import generate_transaksi_hantaran_id
-from pelanggan_tools.pelanggan_service import create_pelanggan
+from pelanggan_tools.pelanggan_service import get_or_create_pelanggan
 from hantaran_tools.pembayaran_hantaran_service import (
     create_pembayaran_hantaran,
 )
 
-from hantaran_tools.database import (get_table, update_data)
+from hantaran_tools.database import (get_table, get_table_raw, update_data)
 
 
 @st.cache_data(ttl=300)
@@ -177,6 +177,141 @@ def _build_detail_item_hantaran(id_transaksi, detail_paket, keranjang):
     return detail_item
 
 
+def _perbarui_stock(detail_item, perubahan):
+    """Tambah atau kurangi stok berdasarkan daftar barang fisik."""
+    kebutuhan = pd.DataFrame(detail_item).groupby(
+        "kode_produk",
+        as_index=False
+    )["jumlah"].sum()
+    produk = get_table_raw("produk_hantaran_satuan")
+
+    stock_baru = []
+    for _, item in kebutuhan.iterrows():
+        cocok = produk.loc[
+            produk["kode_produk"].eq(item["kode_produk"])
+        ]
+        if cocok.empty:
+            raise ValueError(f"Produk {item['kode_produk']} tidak ditemukan.")
+
+        stok = int(cocok.iloc[0]["total_stock"])
+        jumlah_baru = stok + (perubahan * int(item["jumlah"]))
+        if jumlah_baru < 0:
+            raise ValueError(
+                f"Stok {item['kode_produk']} tidak cukup untuk disewakan."
+            )
+
+        stock_baru.append((item["kode_produk"], jumlah_baru))
+
+    for kode_produk, jumlah_baru in stock_baru:
+        update_data(
+            "produk_hantaran_satuan",
+            {"total_stock": jumlah_baru},
+            "kode_produk",
+            kode_produk,
+        )
+
+
+def _validasi_stock(detail_item):
+    """Pastikan semua kebutuhan barang tersedia sebelum transaksi disimpan."""
+    kebutuhan = pd.DataFrame(detail_item).groupby(
+        "kode_produk",
+        as_index=False,
+    )["jumlah"].sum()
+    produk = get_table_raw("produk_hantaran_satuan")
+
+    for _, item in kebutuhan.iterrows():
+        cocok = produk.loc[
+            produk["kode_produk"].eq(item["kode_produk"])
+        ]
+        if cocok.empty or int(cocok.iloc[0]["total_stock"]) < int(item["jumlah"]):
+            raise ValueError(
+                f"Stok {item['kode_produk']} tidak cukup untuk disewakan."
+            )
+
+
+def refresh_status_paket():
+    """Aktifkan paket hanya bila seluruh produk fisiknya masih mencukupi."""
+    detail = load_all_detail_paket()
+    produk = get_table_raw("produk_hantaran_satuan")
+    stok = produk.set_index("kode_produk")["total_stock"].to_dict()
+
+    kebutuhan_paket = (
+        detail.groupby(["kode_paket", "kode_produk"], as_index=False)["jumlah"]
+        .max()
+    )
+
+    for kode_paket, kebutuhan in kebutuhan_paket.groupby("kode_paket"):
+        tersedia = all(
+            int(stok.get(item["kode_produk"], 0)) >= int(item["jumlah"])
+            for _, item in kebutuhan.iterrows()
+        )
+        update_data(
+            "master_paket_hantaran",
+            {"status_aktif": tersedia},
+            "kode_paket",
+            kode_paket,
+        )
+
+    load_master_with_price.clear()
+    load_produk_satuan.clear()
+    get_table.clear()
+
+
+def load_transaksi_disewakan():
+    """Ambil transaksi yang belum diproses pengembaliannya."""
+    transaksi = get_table_raw("transaksi_hantaran")
+    if transaksi.empty:
+        return transaksi
+
+    return transaksi.loc[
+        transaksi["status_pengembalian"].fillna("").astype(str)
+        .str.casefold().eq("disewakan")
+    ].copy()
+
+
+def load_item_disewakan(id_transaksi):
+    """Ambil barang fisik yang perlu dikembalikan dalam satu transaksi."""
+    detail = get_table_raw("detail_item_hantaran")
+    return detail.loc[detail["id_transaksi"].eq(id_transaksi)].copy()
+
+
+def proses_pengembalian_hantaran(id_transaksi):
+    """Kembalikan seluruh stok transaksi dan perbarui ketersediaan paket."""
+    transaksi = get_table_raw("transaksi_hantaran")
+    status = transaksi.loc[
+        transaksi["id_transaksi"].eq(id_transaksi),
+        "status_pengembalian",
+    ]
+    if status.empty or str(status.iloc[0]).casefold() != "disewakan":
+        raise ValueError("Transaksi ini sudah dikembalikan atau tidak ditemukan.")
+
+    detail_item = load_item_disewakan(id_transaksi)
+    if detail_item.empty:
+        raise ValueError("Detail barang transaksi tidak ditemukan.")
+
+    _perbarui_stock(detail_item.to_dict("records"), perubahan=1)
+    update_data(
+        "transaksi_hantaran",
+        {"status_pengembalian": "Dikembalikan"},
+        "id_transaksi",
+        id_transaksi,
+    )
+    insert_data(
+        "log_hantaran",
+        [
+            {
+                "kode_produk": item["kode_produk"],
+                "status": "Dikembalikan",
+                "jumlah": item["jumlah"],
+                "keterangan": f"Dikembalikan dari transaksi: {id_transaksi}",
+            }
+            for item in detail_item.to_dict("records")
+        ]
+    )
+    refresh_status_paket()
+    return date.today()
+
+
 def hitung_tanggal_hantaran(tanggal_acara):
     """Hitung periode blok H-6 hingga batas pengembalian H+2."""
     return {
@@ -201,10 +336,16 @@ def simpan_transaksi_hantaran(
     detail_paket,
 ):
     """Simpan header, detail, log, dan pembayaran transaksi hantaran."""
-    id_pelanggan = create_pelanggan(nama_pelanggan, no_hp)
+    id_pelanggan = get_or_create_pelanggan(nama_pelanggan, no_hp)
     id_transaksi = generate_transaksi_hantaran_id()
     tanggal_hantaran = hitung_tanggal_hantaran(tanggal_acara)
     status_pembayaran = "Lunas" if sisa_pembayaran == 0 else "Belum Lunas"
+    detail_item = _build_detail_item_hantaran(
+        id_transaksi,
+        detail_paket,
+        keranjang,
+    )
+    _validasi_stock(detail_item)
 
     insert_data(
         "transaksi_hantaran",
@@ -244,11 +385,7 @@ def simpan_transaksi_hantaran(
         })
     insert_data("detail_transaksi_hantaran", detail_transaksi)
 
-    detail_item = _build_detail_item_hantaran(
-        id_transaksi,
-        detail_paket,
-        keranjang,
-    )
+    _perbarui_stock(detail_item, perubahan=-1)
     insert_data("detail_item_hantaran", detail_item)
 
     insert_data(
@@ -271,11 +408,7 @@ def simpan_transaksi_hantaran(
         sisa=int(sisa_pembayaran),
     )
 
-    kode_paket = keranjang.loc[
-        keranjang["tipe_item"].eq("Paket"),
-        "kode_produk"
-    ].iloc[0]
-    update_status_paket(kode_paket, False)
+    refresh_status_paket()
 
     return {
         "id_pelanggan": id_pelanggan,

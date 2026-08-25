@@ -1,32 +1,54 @@
 import streamlit as st
+
 from hantaran_tools.hantaran_service import (
-    load_master_with_price, 
-    update_status_paket
+    load_item_disewakan,
+    load_transaksi_disewakan,
+    proses_pengembalian_hantaran,
 )
 
-@st.dialog("Konfirmasi Penyewaan")
-def dialog_konfirmasi(kode_paket, nama_paket):
 
-    st.write(f"**Kode Paket:** {kode_paket}")
-    st.write(f"**Nama Paket:** {nama_paket}")
+@st.dialog("Konfirmasi Pengembalian")
+def dialog_konfirmasi_pengembalian(id_transaksi):
+    st.write(f"Transaksi: **{id_transaksi}**")
+    st.write("Semua barang transaksi ini akan dikembalikan ke stok.")
 
-    col1, col2 = st.columns(2)
+    if st.button("Ya, Proses Pengembalian", type="primary"):
+        try:
+            proses_pengembalian_hantaran(id_transaksi)
+        except Exception as error:
+            st.error(f"Pengembalian gagal diproses: {error}")
+            return
 
-    with col1:
-        if st.button("Ya, Sewakan"):
+        st.success("Stok berhasil dikembalikan dan status paket diperbarui.")
+        st.rerun()
 
-            update_status_paket(kode_paket)
-
-            del st.session_state["detail_paket"]
-            del st.session_state["kode_paket"]
-            del st.session_state["kategori_hantaran"]
-
-            st.rerun()
-
-    with col2:
-        if st.button("Batal"):
-            st.rerun()
 
 def pengembalian_hantaran_page():
-    master_df = load_master_with_price()
-    st.dataframe(master_df[master_df['status_aktif'] == False])
+    st.title("Pengembalian Hantaran")
+    st.write("Proses pengembalian seluruh barang dari transaksi yang disewakan.")
+
+    transaksi = load_transaksi_disewakan()
+    if transaksi.empty:
+        st.info("Tidak ada transaksi hantaran yang menunggu pengembalian.")
+        return
+
+    pilihan = (
+        transaksi["id_transaksi"]
+        + " - "
+        + transaksi["tanggal_acara"].astype(str)
+    ).tolist()
+    selected_label = st.selectbox("Pilih Transaksi", pilihan)
+    id_transaksi = selected_label.split(" - ")[0]
+
+    item = load_item_disewakan(id_transaksi)
+    st.subheader("Barang yang Dikembalikan")
+    st.dataframe(
+        item[["kode_produk", "jumlah"]].rename(
+            columns={"kode_produk": "Kode Produk", "jumlah": "Qty"}
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if st.button("Proses Pengembalian", type="primary"):
+        dialog_konfirmasi_pengembalian(id_transaksi)

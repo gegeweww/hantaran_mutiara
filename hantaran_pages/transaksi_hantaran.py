@@ -76,6 +76,7 @@ def reset_transaksi_hantaran():
         "nama_paket",
         "produk_tambahan",
         "nominal_pembayaran",
+        "menyimpan_transaksi",
     ]:
         st.session_state.pop(key, None)
 
@@ -91,10 +92,13 @@ def dialog_ringkasan_pembayaran(data):
 **Sisa:** Rp {data['sisa']:,.0f}
 """)
 
-    if st.button("OK", type="primary"):
+    sedang_menyimpan = st.session_state.get("menyimpan_transaksi", False)
+    if st.button("OK", type="primary", disabled=sedang_menyimpan):
+        st.session_state["menyimpan_transaksi"] = True
         try:
             hasil = simpan_transaksi_hantaran(**data["transaksi"])
         except Exception as error:
+            st.session_state["menyimpan_transaksi"] = False
             st.error(f"Transaksi gagal disimpan: {error}")
             return
 
@@ -136,6 +140,7 @@ def transaksi_hantaran_page():
         "diskon_harga": 0,
         "via_pembayaran": "Cash",
         "nominal_pembayaran": 0,
+        "menyimpan_transaksi": False,
     }
 
     for key, value in DEFAULT_SESSION.items():
