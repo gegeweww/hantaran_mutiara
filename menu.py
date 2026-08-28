@@ -4,6 +4,7 @@ import streamlit as st
 from hantaran_pages.data_hantaran import data_hantaran_page
 from hantaran_pages.transaksi_hantaran import transaksi_hantaran_page
 from hantaran_pages.pengembalian_hantaran import pengembalian_hantaran_page
+from hantaran_pages.h_dashboard import hantaran_dasboard_page
 from craft_pages.data_craft import data_craft_page
 
 
@@ -30,6 +31,11 @@ def show_menu():
                 title="Pengembalian Hantaran",
                 icon="🔄",
             ),
+            st.Page(
+                hantaran_dasboard_page,
+                title="Dashboard",
+                icon="💹"
+            )
         ],
         "🎨 Craft": [
             st.Page(data_craft_page, title="Data Craft", icon="✂️"),

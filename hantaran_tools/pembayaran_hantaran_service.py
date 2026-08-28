@@ -11,8 +11,9 @@ def create_pembayaran_hantaran(
     nominal,
     metode_pembayaran,
     sisa,
+    jenis_pembayaran="Sewa",
 ):
-    """Simpan pembayaran pertama bila transaksi menerima pembayaran."""
+    """Simpan pembayaran sewa atau denda bila transaksi menerima pembayaran."""
 
     if nominal <= 0:
         return None
@@ -24,6 +25,7 @@ def create_pembayaran_hantaran(
             "id_pembayaran": id_pembayaran,
             "id_transaksi": id_transaksi,
             "kategori_transaksi": "Hantaran",
+            "jenis_pembayaran": jenis_pembayaran,
             "tanggal_bayar": date.today().isoformat(),
             "nominal": nominal,
             "metode": metode_pembayaran,

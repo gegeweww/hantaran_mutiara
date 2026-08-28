@@ -51,6 +51,10 @@ def load_all_detail_paket():
 def load_produk_satuan():
     return get_table("produk_hantaran_satuan")
 
+@st.cache_data(ttl=300)
+def load_pemasukan():
+    return get_table("pembayaran_hantaran")
+
 def load_produk_tambahan(kode_paket=None, kategori_hantaran=None):
     df = load_produk_satuan()
     df_harga = get_table("harga_produk_hantaran_satuan")
@@ -263,20 +267,95 @@ def load_transaksi_disewakan():
     if transaksi.empty:
         return transaksi
 
-    return transaksi.loc[
+    transaksi = transaksi.loc[
         transaksi["status_pengembalian"].fillna("").astype(str)
         .str.casefold().eq("disewakan")
     ].copy()
+    pelanggan = get_table_raw("pelanggan")
+
+    return transaksi.merge(
+        pelanggan[["id_pelanggan", "nama"]].rename(
+            columns={"nama": "nama_pelanggan"}
+        ),
+        on="id_pelanggan",
+        how="left",
+    )
 
 
 def load_item_disewakan(id_transaksi):
     """Ambil barang fisik yang perlu dikembalikan dalam satu transaksi."""
     detail = get_table_raw("detail_item_hantaran")
-    return detail.loc[detail["id_transaksi"].eq(id_transaksi)].copy()
+    detail = detail.loc[detail["id_transaksi"].eq(id_transaksi)].copy()
+    if detail.empty:
+        return detail
+
+    detail = detail.groupby("kode_produk", as_index=False)["jumlah"].sum()
+    produk = get_table_raw("produk_hantaran_satuan")
+    return detail.merge(
+        produk[["kode_produk", "nama_produk", "harga_denda"]],
+        on="kode_produk",
+        how="left",
+    )
 
 
-def proses_pengembalian_hantaran(id_transaksi):
-    """Kembalikan seluruh stok transaksi dan perbarui ketersediaan paket."""
+def build_return_payload(data_pengembalian):
+    """Validasi input pengembalian dan hitung qty aman setiap item."""
+    payload = []
+
+    for item in data_pengembalian:
+        jumlah = int(item["jumlah"])
+        jumlah_rusak = int(item["jumlah_rusak"])
+        catatan = item.get("catatan", "").strip()
+
+        if jumlah_rusak < 0 or jumlah_rusak > jumlah:
+            raise ValueError("Qty rusak harus berada antara 0 dan qty disewa.")
+        if jumlah_rusak and not catatan:
+            raise ValueError(
+                f"Keterangan kerusakan untuk {item['kode_produk']} wajib diisi."
+            )
+
+        payload.append({
+            "kode_produk": item["kode_produk"],
+            "qty_aman": jumlah - jumlah_rusak,
+            "qty_rusak": jumlah_rusak,
+            "nominal_denda": int(item.get("harga_denda", 0)) * jumlah_rusak,
+            "catatan": catatan,
+        })
+
+    return payload
+
+
+def _refresh_status_transaksi(id_transaksi):
+    """Perbarui status utama: Selesai hanya bila lunas dan dikembalikan."""
+    transaksi = get_table_raw("transaksi_hantaran")
+    data = transaksi.loc[transaksi["id_transaksi"].eq(id_transaksi)]
+    if data.empty:
+        raise ValueError("Transaksi tidak ditemukan.")
+
+    transaksi = data.iloc[0]
+    status_lama = str(transaksi["status_transaksi"]).casefold()
+    if status_lama == "batal":
+        return
+
+    lunas = str(transaksi["status_pembayaran"]).casefold() == "lunas"
+    dikembalikan = (
+        str(transaksi["status_pengembalian"]).casefold() == "dikembalikan"
+    )
+    update_data(
+        "transaksi_hantaran",
+        {"status_transaksi": "Selesai" if lunas and dikembalikan else "Aktif"},
+        "id_transaksi",
+        id_transaksi,
+    )
+
+
+def proses_pengembalian_hantaran(
+    id_transaksi,
+    data_pengembalian,
+    total_denda=0,
+    metode_denda=None,
+):
+    """Proses pengembalian aman/rusak, log, dan pembayaran denda."""
     transaksi = get_table_raw("transaksi_hantaran")
     status = transaksi.loc[
         transaksi["id_transaksi"].eq(id_transaksi),
@@ -289,27 +368,72 @@ def proses_pengembalian_hantaran(id_transaksi):
     if detail_item.empty:
         raise ValueError("Detail barang transaksi tidak ditemukan.")
 
-    _perbarui_stock(detail_item.to_dict("records"), perubahan=1)
+    payload = build_return_payload(data_pengembalian)
+    kode_detail = set(detail_item["kode_produk"])
+    if set(item["kode_produk"] for item in payload) != kode_detail:
+        raise ValueError("Data pengembalian tidak sesuai dengan item transaksi.")
+
+    item_rusak = [item for item in payload if item["qty_rusak"]]
+    if item_rusak and int(total_denda) <= 0:
+        raise ValueError("Total denda wajib diisi bila terdapat item rusak.")
+    if item_rusak and not metode_denda:
+        raise ValueError("Metode pembayaran denda wajib dipilih.")
+
+    item_aman = [
+        {"kode_produk": item["kode_produk"], "jumlah": item["qty_aman"]}
+        for item in payload
+        if item["qty_aman"]
+    ]
+    if item_aman:
+        _perbarui_stock(item_aman, perubahan=1)
+
     update_data(
         "transaksi_hantaran",
         {"status_pengembalian": "Dikembalikan"},
         "id_transaksi",
         id_transaksi,
     )
-    insert_data(
-        "log_hantaran",
-        [
-            {
-                "kode_produk": item["kode_produk"],
-                "status": "Dikembalikan",
-                "jumlah": item["jumlah"],
-                "keterangan": f"Dikembalikan dari transaksi: {id_transaksi}",
-            }
-            for item in detail_item.to_dict("records")
-        ]
-    )
+    log_dikembalikan = [
+        {
+            "kode_produk": item["kode_produk"],
+            "status": "Dikembalikan",
+            "jumlah": item["qty_aman"],
+            "keterangan": f"Dikembalikan dari transaksi: {id_transaksi}",
+        }
+        for item in payload
+        if item["qty_aman"]
+    ]
+    if log_dikembalikan:
+        insert_data("log_hantaran", log_dikembalikan)
+
+    if item_rusak:
+        insert_data(
+            "log_hantaran",
+            [
+                {
+                    "kode_produk": item["kode_produk"],
+                    "status": "Rusak",
+                    "jumlah": item["qty_rusak"],
+                    "keterangan": (
+                        f"Rusak pada transaksi: {id_transaksi}. {item['catatan']}"
+                    ),
+                }
+                for item in item_rusak
+            ]
+        )
+
+    if item_rusak:
+        create_pembayaran_hantaran(
+            id_transaksi=id_transaksi,
+            nominal=int(total_denda),
+            metode_pembayaran=metode_denda,
+            sisa=0,
+            jenis_pembayaran="Denda",
+        )
+
+    _refresh_status_transaksi(id_transaksi)
     refresh_status_paket()
-    return date.today()
+    return {"tanggal": date.today(), "total_denda": int(total_denda)}
 
 
 def hitung_tanggal_hantaran(tanggal_acara):
